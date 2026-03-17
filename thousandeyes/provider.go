@@ -77,6 +77,7 @@ func Provider() *schema.Provider {
 			"thousandeyes_user":               resourceUser(),
 			"thousandeyes_role":               resourceRole(),
 			"thousandeyes_connector":          resourceConnector(),
+			"thousandeyes_connector_assignment": resourceConnectorAssignment(),
 			"thousandeyes_webhook_operation":  resourceWebhookOperation(),
 		},
 		DataSourcesMap: map[string]*schema.Resource{
