@@ -7,6 +7,7 @@ import (
 	"log"
 	"reflect"
 	"regexp"
+	"sort"
 	"slices"
 	"strconv"
 	"strings"
@@ -24,7 +25,7 @@ type setInConfigKeyType string
 const tagsKey resourceKeyType = "tags"
 const setInConfigKey setInConfigKeyType = "is_set"
 
-var sensitiveFields = []string{"password", "custom_headers", "headers", "bearer_token", "client_id", "client_secret"}
+var sensitiveFields = []string{"password", "bearer_token", "client_id", "client_secret"}
 
 // emptyStringToNilTypes contains type names that should be converted to nil when their value is an empty string.
 // This handles cases where the Terraform SDK v2 converts null values to empty strings, but the API expects
@@ -295,6 +296,12 @@ func FixReadValues(ctx context.Context, targetMaps map[string]map[string]interfa
 			return nil, nil
 		}
 
+	// Normalize header order so API reordering does not cause drift.
+	case "headers":
+		if headers, ok := normalizeStringInterfaceSlice(m); ok {
+			m = headers
+		}
+
 	// Return only host when host:port pattern obtained
 	case "server":
 		m = strings.Split(m.(string), ":")[0]
@@ -343,12 +350,21 @@ func FixReadValues(ctx context.Context, targetMaps map[string]map[string]interfa
 			m.([]interface{})[i] = label["label_id"]
 		}
 
-	// custom_headers is currently unsupported due to complications with Terraform
-	// and the object schema.  It will presently be removed from state, and when
-	// a solution is found it will be transformed here according to the specification
-	// of that solution.
+	// custom_headers is represented as a single nested block in schema, so wrap
+	// the decoded object into a one-item slice before writing state.
 	case "custom_headers":
-		m = nil
+		if m == nil {
+			return nil, nil
+		}
+		if customHeaders, ok := m.(map[string]interface{}); ok {
+			customHeaders["root"] = normalizeStringMap(customHeaders["root"])
+			customHeaders["all"] = normalizeStringMap(customHeaders["all"])
+			customHeaders["domains"] = normalizeNestedStringMap(customHeaders["domains"])
+			m = customHeaders
+		}
+		if _, ok := m.([]interface{}); !ok {
+			m = []interface{}{m}
+		}
 
 	// download_limit may appear as a string instead of an integer.
 	case "download_limit":
@@ -847,7 +863,11 @@ func FillValue(source interface{}, target interface{}) interface{} {
 		vs := reflect.ValueOf(source)
 		structSource := source
 		if vs.Kind() == reflect.Slice {
-			structSource = source.([]interface{})[0]
+			if vs.Len() == 0 {
+				source = nil
+			} else {
+				structSource = source.([]interface{})[0]
+			}
 		} else if vs.Kind() == reflect.Ptr {
 			structSource = source.(*schema.Set).List()
 			if len(structSource.([]interface{})) != 0 {
@@ -975,6 +995,106 @@ func SetAidFromContext[T RequestWithAid[T]](ctx context.Context, req T) T {
 
 func getPointer[T any](v T) *T {
 	return &v
+}
+
+func normalizeStringInterfaceSlice(v interface{}) ([]interface{}, bool) {
+	switch headers := v.(type) {
+	case []interface{}:
+		out := make([]string, 0, len(headers))
+		for _, item := range headers {
+			s, ok := item.(string)
+			if !ok {
+				return nil, false
+			}
+			out = append(out, s)
+		}
+		sort.Strings(out)
+		normalized := make([]interface{}, 0, len(out))
+		for _, item := range out {
+			normalized = append(normalized, item)
+		}
+		return normalized, true
+	case []string:
+		out := append([]string(nil), headers...)
+		sort.Strings(out)
+		normalized := make([]interface{}, 0, len(out))
+		for _, item := range out {
+			normalized = append(normalized, item)
+		}
+		return normalized, true
+	default:
+		return nil, false
+	}
+}
+
+func normalizeStringMap(v interface{}) map[string]interface{} {
+	switch m := v.(type) {
+	case nil:
+		return map[string]interface{}{}
+	case map[string]interface{}:
+		return m
+	case map[string]string:
+		out := make(map[string]interface{}, len(m))
+		for k, val := range m {
+			out[k] = val
+		}
+		return out
+	case *map[string]string:
+		if m == nil {
+			return map[string]interface{}{}
+		}
+		out := make(map[string]interface{}, len(*m))
+		for k, val := range *m {
+			out[k] = val
+		}
+		return out
+	case *map[string]interface{}:
+		if m == nil {
+			return map[string]interface{}{}
+		}
+		return *m
+	default:
+		return map[string]interface{}{}
+	}
+}
+
+func normalizeNestedStringMap(v interface{}) map[string]interface{} {
+	switch m := v.(type) {
+	case nil:
+		return map[string]interface{}{}
+	case map[string]interface{}:
+		out := make(map[string]interface{}, len(m))
+		for k, val := range m {
+			out[k] = normalizeStringMap(val)
+		}
+		return out
+	case map[string]map[string]string:
+		out := make(map[string]interface{}, len(m))
+		for k, val := range m {
+			out[k] = normalizeStringMap(val)
+		}
+		return out
+	case *map[string]map[string]string:
+		if m == nil {
+			return map[string]interface{}{}
+		}
+		out := make(map[string]interface{}, len(*m))
+		for k, val := range *m {
+			out[k] = normalizeStringMap(val)
+		}
+		return out
+	case *map[string]interface{}:
+		if m == nil {
+			return map[string]interface{}{}
+		}
+		out := make(map[string]interface{}, len(*m))
+		for k, val := range *m {
+			out[k] = normalizeStringMap(val)
+		}
+		return out
+	default:
+		return map[string]interface{}{}
+	}
 }
 
 func checkDomainRecordTypeExists(domain string) bool {

@@ -11,13 +11,18 @@ import (
 	"github.com/thousandeyes/thousandeyes-sdk-go/v3/tests"
 )
 
+const httpHeaderSourceModeField = "header_source_mode"
+const httpHeaderSourceModeHeaders = "headers"
+const httpHeaderSourceModeCustomHeaders = "custom_headers"
+
 func resourceHTTPServer() *schema.Resource {
 	resource := schema.Resource{
-		Schema: ResourceSchemaBuild(tests.HttpServerTestRequest{}, schemas.CommonSchema, nil),
-		Create: resourceHTTPServerCreate,
-		Read:   resourceHTTPServerRead,
-		Update: resourceHTTPServerUpdate,
-		Delete: resourceHTTPServerDelete,
+		Schema:        ResourceSchemaBuild(tests.HttpServerTestRequest{}, schemas.CommonSchema, nil),
+		Create:        resourceHTTPServerCreate,
+		Read:          resourceHTTPServerRead,
+		Update:        resourceHTTPServerUpdate,
+		Delete:        resourceHTTPServerDelete,
+		CustomizeDiff: normalizeHTTPServerHeadersDiff,
 		Importer: &schema.ResourceImporter{
 			State: schema.ImportStatePassthrough,
 		},
@@ -32,19 +37,62 @@ func resourceHTTPServer() *schema.Resource {
 		SchemaVersion: 1,
 	}
 	resource.Schema["oauth"] = schemas.CommonSchema["oauth"]
+	resource.Schema[httpHeaderSourceModeField] = &schema.Schema{
+		Type:     schema.TypeString,
+		Computed: true,
+	}
 	return &resource
 }
 
 func resourceHTTPServerRead(d *schema.ResourceData, m interface{}) error {
-	return GetResource(context.Background(), d, m, func(apiClient *client.APIClient, id string) (interface{}, error) {
-		api := (*tests.HTTPServerTestsAPIService)(&apiClient.Common)
+	apiClient := m.(*client.APIClient)
+	log.Printf("[INFO] Reading Thousandeyes Resource %s", d.Id())
 
-		req := api.GetHttpServerTest(id).Expand(tests.AllowedExpandTestOptionsEnumValues)
-		req = SetAidFromContext(apiClient.GetConfig().Context, req)
+	api := (*tests.HTTPServerTestsAPIService)(&apiClient.Common)
+	req := api.GetHttpServerTest(d.Id()).Expand(tests.AllowedExpandTestOptionsEnumValues)
+	req = SetAidFromContext(apiClient.GetConfig().Context, req)
 
-		resp, _, err := req.Execute()
-		return resp, err
-	})
+	resp, _, err := req.Execute()
+	if err != nil && IsNotFoundError(err) {
+		log.Printf("[INFO] Resource was deleted - will recreate it")
+		d.SetId("")
+		return nil
+	} else if err != nil {
+		return err
+	}
+
+	if err := ResourceRead(context.Background(), d, resp); err != nil {
+		return err
+	}
+
+	mode := httpHeaderSourceMode(d)
+	if mode == httpHeaderSourceModeCustomHeaders {
+		// Keep only custom_headers in state when it is the configured source of truth.
+		if err := d.Set("headers", nil); err != nil {
+			return err
+		}
+		if err := d.Set("custom_headers", terraformHTTPServerCustomHeadersValue(resp.CustomHeaders)); err != nil {
+			return err
+		}
+	} else {
+		apiHeaders, ok := normalizeStringInterfaceSlice(resp.Headers)
+		if ok {
+			if err := d.Set("headers", apiHeaders); err != nil {
+				return err
+			}
+		} else if err := d.Set("headers", nil); err != nil {
+			return err
+		}
+		if err := d.Set("custom_headers", []interface{}{}); err != nil {
+			return err
+		}
+	}
+
+	if err := d.Set(httpHeaderSourceModeField, mode); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func resourceHTTPServerUpdate(d *schema.ResourceData, m interface{}) error {
@@ -101,5 +149,19 @@ func resourceHTTPServerCreate(d *schema.ResourceData, m interface{}) error {
 }
 
 func buildHTTPServerStruct(d *schema.ResourceData) *tests.HttpServerTestRequest {
-	return ResourceBuildStruct(d, &tests.HttpServerTestRequest{})
+	req := ResourceBuildStruct(d, &tests.HttpServerTestRequest{})
+	headers, headersConfigured := rawConfigHeaderStrings(d)
+	customHeaders, customHeadersConfigured := rawConfigCustomHeaders(d)
+
+	if headersConfigured {
+		req.Headers = headers
+		req.CustomHeaders = nil
+	} else if customHeadersConfigured {
+		req.Headers = nil
+		req.CustomHeaders = customHeaders
+	} else {
+		req.Headers = nil
+		req.CustomHeaders = nil
+	}
+	return req
 }
