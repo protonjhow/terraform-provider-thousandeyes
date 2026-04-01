@@ -12,7 +12,7 @@ var DashboardSchema = map[string]*schema.Schema{
 	// id
 	"id": {
 		Type:        schema.TypeString,
-		Description: "The tag ID.",
+		Description: "The dashboard ID.",
 		Computed:    true,
 	},
 	// aid
@@ -110,6 +110,16 @@ var DashboardSchema = map[string]*schema.Schema{
 					ConflictsWith: []string{"default_timespan.0.duration"},
 				},
 			},
+		},
+	},
+	// widgets
+	"widgets": {
+		Type:        schema.TypeList,
+		Description: "List of widgets on the dashboard.",
+		Optional:    true,
+		Computed:    true,
+		Elem: &schema.Resource{
+			Schema: DashboardWidgetSchema,
 		},
 	},
 }
