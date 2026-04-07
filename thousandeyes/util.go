@@ -123,7 +123,7 @@ func ResourceRead(ctx context.Context, d *schema.ResourceData, structPtr interfa
 	v := reflect.ValueOf(structPtr).Elem()
 	t := reflect.TypeOf(v.Interface())
 
-	targetMaps := getTargetFieldsMaps(structPtr)
+	targetMaps := getTargetFieldsMaps(d, structPtr)
 
 	for i := 0; i < v.NumField(); i++ {
 		tag := GetJSONKey(t.Field(i))
@@ -131,11 +131,6 @@ func ResourceRead(ctx context.Context, d *schema.ResourceData, structPtr interfa
 		_, ok := d.GetOk(tfName)
 
 		if slices.Contains(sensitiveFields, tfName) {
-			if ok {
-				if err := d.Set(tfName, nil); err != nil {
-					return err
-				}
-			}
 			continue
 		}
 
@@ -148,7 +143,14 @@ func ResourceRead(ctx context.Context, d *schema.ResourceData, structPtr interfa
 			return err
 		}
 
-		ctx = context.WithValue(ctx, setInConfigKey, ok)
+		isConfigured := ok
+		if rawConfig := d.GetRawConfig(); !rawConfig.IsNull() && rawConfig.IsKnown() {
+			if ty := rawConfig.Type(); ty.IsObjectType() && ty.HasAttribute(tfName) {
+				v := rawConfig.GetAttr(tfName)
+				isConfigured = v.IsKnown() && !v.IsNull()
+			}
+		}
+		ctx = context.WithValue(ctx, setInConfigKey, isConfigured)
 		val, err = FixReadValues(ctx, targetMaps, val, &tfName)
 		if err != nil {
 			return err
@@ -156,6 +158,8 @@ func ResourceRead(ctx context.Context, d *schema.ResourceData, structPtr interfa
 		if len(tfName) == 0 {
 			continue
 		}
+
+		val = preserveNestedSensitiveFields(d, tfName, val)
 
 		err = d.Set(tfName, val)
 		if err != nil {
@@ -172,32 +176,85 @@ func ResourceRead(ctx context.Context, d *schema.ResourceData, structPtr interfa
 	return nil
 }
 
-// getTargetFieldsMaps gets a map of target fields for a specific resource when multiple fields need to be set in a single target map.
-func getTargetFieldsMaps(structPtr interface{}) map[string]map[string]interface{} {
-	switch structPtr.(type) {
-	// Example:
-	// case (tests.Example):
-	// 	res := make(map[string]map[string]interface{})
-	// 	res["TARGET_FIELD"] = map[string]interface{}{
-	// 		"SOURCE_FIELD_1":     nil,
-	// 		"SOURCE_FIELD_2":     nil,
-	// 		"SOURCE_FIELD_3":     nil,
-	// 		...
-	// 	}
-	// 	return res
-	case (*tests.SipServerTestResponse):
-		res := make(map[string]map[string]interface{})
-		res["target_sip_credentials"] = map[string]interface{}{
-			"auth_user":     nil,
-			"port":          nil,
-			"protocol":      nil,
-			"sip_registrar": nil,
-			"user":          nil,
-		}
-		return res
+// preserveNestedSensitiveFields injects current state values for sensitive
+// sub-fields into nested block values before they are written back via d.Set.
+// The API never returns sensitive field values, so ReadValue produces maps
+// that lack them. Without this, d.Set would overwrite the parent block and
+// reset the sensitive sub-fields to empty strings.
+func preserveNestedSensitiveFields(d *schema.ResourceData, tfName string, val interface{}) interface{} {
+	valSlice, ok := val.([]interface{})
+	if !ok {
+		return val
 	}
 
-	return nil
+	current := d.Get(tfName)
+	var currentList []interface{}
+	switch c := current.(type) {
+	case *schema.Set:
+		currentList = c.List()
+	case []interface{}:
+		currentList = c
+	default:
+		return val
+	}
+
+	for i, elem := range valSlice {
+		elemMap, ok := elem.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if i >= len(currentList) {
+			continue
+		}
+		currentMap, ok := currentList[i].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		for _, sf := range sensitiveFields {
+			if _, exists := elemMap[sf]; !exists {
+				if stateVal, exists := currentMap[sf]; exists && stateVal != "" {
+					elemMap[sf] = stateVal
+				}
+			}
+		}
+	}
+
+	return val
+}
+
+// getTargetFieldsMaps builds a map of target fields for resources where
+// multiple flat API response fields map to a single nested Terraform block.
+// Fields are pre-populated from the current state so that values the API
+// doesn't return (nil pointers) keep their existing values instead of
+// becoming empty strings, which would change the TypeSet hash and cause
+// Terraform to silently drop config values during planning.
+func getTargetFieldsMaps(d *schema.ResourceData, structPtr interface{}) map[string]map[string]interface{} {
+	var res map[string]map[string]interface{}
+
+	switch structPtr.(type) {
+	case (*tests.SipServerTestResponse):
+		res = map[string]map[string]interface{}{
+			"target_sip_credentials": {
+				"auth_user":     nil,
+				"port":          nil,
+				"protocol":      nil,
+				"sip_registrar": nil,
+				"user":          nil,
+			},
+		}
+		if existing, ok := d.GetOk("target_sip_credentials"); ok {
+			for _, item := range existing.(*schema.Set).List() {
+				old := item.(map[string]interface{})
+				for field := range res["target_sip_credentials"] {
+					if val, exists := old[field]; exists {
+						res["target_sip_credentials"][field] = val
+					}
+				}
+			}
+		}
+	}
+
+	return res
 }
 
 // FixReadValues adjusts certain values returned from ThousandEyes to make them
@@ -277,6 +334,13 @@ func FixReadValues(ctx context.Context, targetMaps map[string]map[string]interfa
 
 	// Ignore emulated device ID if it wasn't set
 	case "emulated_device_id":
+		if isSet, _ := ctx.Value(setInConfigKey).(bool); !isSet {
+			*name = ""
+			return nil, nil
+		}
+
+	// Ignore BGP measurements if it wasn't set, prevents API side effects from being saved to state
+	case "bgp_measurements":
 		if isSet, _ := ctx.Value(setInConfigKey).(bool); !isSet {
 			*name = ""
 			return nil, nil
@@ -609,6 +673,9 @@ func FixReadValues(ctx context.Context, targetMaps map[string]map[string]interfa
 		if m == nil {
 			return nil, nil
 		}
+		if oauthMap, ok := m.(map[string]interface{}); ok && len(oauthMap) == 0 {
+			return nil, nil
+		}
 		if _, ok := m.([]interface{}); !ok {
 			m = []interface{}{m}
 		}
@@ -640,7 +707,6 @@ func ReadValue(structPtr interface{}) (interface{}, error) {
 			tfName := CamelCaseToUnderscore(tag)
 
 			if slices.Contains(sensitiveFields, tfName) {
-				newMap[tfName] = nil
 				continue
 			}
 			if v.Field(i).Kind() == reflect.Ptr && v.Field(i).IsNil() {
