@@ -32,10 +32,15 @@ func resourceTagAssignmentRead(d *schema.ResourceData, m interface{}) error {
 
 	log.Printf("[INFO] Reading ThousandEyes Tag assignment %s", d.Id())
 
-	req := api.GetTag(d.Id()).Expand(tags.AllowedExpandTagsOptionsEnumValues)
+	// Verify the tag still exists. We don't read assignments back from the
+	// API because GetTag's expand=assignments returns an empty list for
+	// established tags. Assignments in state are authoritative -- they are
+	// set by Create and Update, which use the dedicated assign/unassign
+	// endpoints.
+	req := api.GetTag(d.Id())
 	req = SetAidFromContext(apiClient.GetConfig().Context, req)
 
-	resp, _, err := req.Execute()
+	_, _, err := req.Execute()
 	if err != nil {
 		if IsNotFoundError(err) {
 			log.Printf("[INFO] Tag assignment was deleted - will recreate it")
@@ -45,10 +50,15 @@ func resourceTagAssignmentRead(d *schema.ResourceData, m interface{}) error {
 		return err
 	}
 
-	if err := d.Set("tag_id", resp.Id); err != nil {
-		return err
+	// Set tag_id for import support (ImportStatePassthroughContext only
+	// sets the resource ID, not the schema attributes).
+	if _, ok := d.GetOk("tag_id"); !ok {
+		if err := d.Set("tag_id", d.Id()); err != nil {
+			return err
+		}
 	}
-	return d.Set("assignments", flattenAssignments(resp.Assignments))
+
+	return nil
 }
 
 func resourceTagAssignmentDelete(d *schema.ResourceData, m interface{}) error {
@@ -203,22 +213,4 @@ func mapTagToBulkTagAssignment(in *tags.Tag) *tags.BulkTagAssignment {
 		TagId:       in.Id,
 		Assignments: in.Assignments,
 	}
-}
-
-// flattenAssignments converts SDK Assignment structs to plain string maps
-// suitable for d.Set on a TypeSet schema. This avoids the pointer/enum type
-// coercion issues in the generic ResourceRead pipeline.
-func flattenAssignments(assignments []tags.Assignment) []map[string]interface{} {
-	result := make([]map[string]interface{}, 0, len(assignments))
-	for _, a := range assignments {
-		entry := map[string]interface{}{}
-		if a.Id != nil {
-			entry["id"] = *a.Id
-		}
-		if a.Type != nil {
-			entry["type"] = string(*a.Type)
-		}
-		result = append(result, entry)
-	}
-	return result
 }
