@@ -1,7 +1,6 @@
 package thousandeyes
 
 import (
-	"context"
 	"errors"
 	"log"
 
@@ -28,15 +27,28 @@ func resourceTagAssignment() *schema.Resource {
 }
 
 func resourceTagAssignmentRead(d *schema.ResourceData, m interface{}) error {
-	return GetResource(context.Background(), d, m, func(apiClient *client.APIClient, id string) (interface{}, error) {
-		api := (*tags.TagsAPIService)(&apiClient.Common)
+	apiClient := m.(*client.APIClient)
+	api := (*tags.TagsAPIService)(&apiClient.Common)
 
-		req := api.GetTag(id).Expand(tags.AllowedExpandTagsOptionsEnumValues)
-		req = SetAidFromContext(apiClient.GetConfig().Context, req)
+	log.Printf("[INFO] Reading ThousandEyes Tag assignment %s", d.Id())
 
-		resp, _, err := req.Execute()
-		return mapTagToBulkTagAssignment(resp), err
-	})
+	req := api.GetTag(d.Id()).Expand(tags.AllowedExpandTagsOptionsEnumValues)
+	req = SetAidFromContext(apiClient.GetConfig().Context, req)
+
+	resp, _, err := req.Execute()
+	if err != nil {
+		if IsNotFoundError(err) {
+			log.Printf("[INFO] Tag assignment was deleted - will recreate it")
+			d.SetId("")
+			return nil
+		}
+		return err
+	}
+
+	if err := d.Set("tag_id", resp.Id); err != nil {
+		return err
+	}
+	return d.Set("assignments", flattenAssignments(resp.Assignments))
 }
 
 func resourceTagAssignmentDelete(d *schema.ResourceData, m interface{}) error {
@@ -191,4 +203,22 @@ func mapTagToBulkTagAssignment(in *tags.Tag) *tags.BulkTagAssignment {
 		TagId:       in.Id,
 		Assignments: in.Assignments,
 	}
+}
+
+// flattenAssignments converts SDK Assignment structs to plain string maps
+// suitable for d.Set on a TypeSet schema. This avoids the pointer/enum type
+// coercion issues in the generic ResourceRead pipeline.
+func flattenAssignments(assignments []tags.Assignment) []map[string]interface{} {
+	result := make([]map[string]interface{}, 0, len(assignments))
+	for _, a := range assignments {
+		entry := map[string]interface{}{}
+		if a.Id != nil {
+			entry["id"] = *a.Id
+		}
+		if a.Type != nil {
+			entry["type"] = string(*a.Type)
+		}
+		result = append(result, entry)
+	}
+	return result
 }

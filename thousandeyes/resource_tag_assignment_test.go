@@ -32,6 +32,11 @@ func TestAccThousandEyesTagAssignmentUpdate(t *testing.T) {
 				)...),
 			},
 			{
+				// Verify no drift after apply
+				Config:   testAccThousandEyesTagConfig("acceptance_resources/tag_assignment_update/basic.tf"),
+				PlanOnly: true,
+			},
+			{
 				Config: testAccThousandEyesTagConfig("acceptance_resources/tag_assignment_update/update_assignments.tf"),
 				Check: resource.ComposeTestCheckFunc(testAccCheckTagAssignmentUpdateState(
 					&httpTestID,
