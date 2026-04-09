@@ -32,15 +32,10 @@ func resourceTagAssignmentRead(d *schema.ResourceData, m interface{}) error {
 
 	log.Printf("[INFO] Reading ThousandEyes Tag assignment %s", d.Id())
 
-	// Verify the tag still exists. We don't read assignments back from the
-	// API because GetTag's expand=assignments returns an empty list for
-	// established tags. Assignments in state are authoritative -- they are
-	// set by Create and Update, which use the dedicated assign/unassign
-	// endpoints.
-	req := api.GetTag(d.Id())
+	req := api.GetTag(d.Id()).Expand(tags.AllowedExpandTagsOptionsEnumValues)
 	req = SetAidFromContext(apiClient.GetConfig().Context, req)
 
-	_, _, err := req.Execute()
+	resp, _, err := req.Execute()
 	if err != nil {
 		if IsNotFoundError(err) {
 			log.Printf("[INFO] Tag assignment was deleted - will recreate it")
@@ -50,15 +45,40 @@ func resourceTagAssignmentRead(d *schema.ResourceData, m interface{}) error {
 		return err
 	}
 
-	// Set tag_id for import support (ImportStatePassthroughContext only
-	// sets the resource ID, not the schema attributes).
-	if _, ok := d.GetOk("tag_id"); !ok {
-		if err := d.Set("tag_id", d.Id()); err != nil {
+	if err := d.Set("tag_id", resp.Id); err != nil {
+		return err
+	}
+
+	// Only update assignments in state when the API returns a non-empty
+	// list. The GetTag expand=assignments endpoint sometimes returns an
+	// empty array for tags that do have assignments; when that happens
+	// we preserve whatever is already in state (set by Create/Update)
+	// to avoid spurious drift.
+	if len(resp.Assignments) > 0 {
+		flat := flattenAssignments(resp.Assignments)
+		if err := d.Set("assignments", flat); err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+// flattenAssignments converts SDK Assignment structs to plain string maps
+// suitable for d.Set on a TypeSet schema.
+func flattenAssignments(assignments []tags.Assignment) []interface{} {
+	result := make([]interface{}, 0, len(assignments))
+	for _, a := range assignments {
+		entry := map[string]interface{}{}
+		if a.Id != nil {
+			entry["id"] = *a.Id
+		}
+		if a.Type != nil {
+			entry["type"] = string(*a.Type)
+		}
+		result = append(result, entry)
+	}
+	return result
 }
 
 func resourceTagAssignmentDelete(d *schema.ResourceData, m interface{}) error {

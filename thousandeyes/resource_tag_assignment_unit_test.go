@@ -82,3 +82,52 @@ func tagAssignmentKeys(assignments []tags.Assignment) []string {
 	return keys
 }
 
+func TestFlattenAssignments(t *testing.T) {
+	testType := tags.ASSIGNMENTTYPE_TEST
+	dashType := tags.ASSIGNMENTTYPE_DASHBOARD
+
+	tests := []struct {
+		name     string
+		input    []tags.Assignment
+		expected []interface{}
+	}{
+		{
+			name:     "nil assignments",
+			input:    nil,
+			expected: []interface{}{},
+		},
+		{
+			name:     "empty assignments",
+			input:    []tags.Assignment{},
+			expected: []interface{}{},
+		},
+		{
+			name: "single assignment",
+			input: []tags.Assignment{
+				{Id: getPointer("123"), Type: &testType},
+			},
+			expected: []interface{}{
+				map[string]interface{}{"id": "123", "type": "test"},
+			},
+		},
+		{
+			name: "multiple assignments with different types",
+			input: []tags.Assignment{
+				{Id: getPointer("123"), Type: &testType},
+				{Id: getPointer("456"), Type: &dashType},
+			},
+			expected: []interface{}{
+				map[string]interface{}{"id": "123", "type": "test"},
+				map[string]interface{}{"id": "456", "type": "dashboard"},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := flattenAssignments(tc.input)
+			assert.Equal(t, tc.expected, result)
+		})
+	}
+}
+
